@@ -1,13 +1,15 @@
+
 import streamlit as st
 import pandas as pd
 from PIL import Image, ImageDraw, ImageFont, ExifTags
 import io
 import datetime
+import socket
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font
 from openpyxl.drawing.image import Image as ExcelImage
-from openpyxl.worksheet.page_break import Break
-import os
+from pyngrok import ngrok, conf
+from pyngrok.exception import PyngrokNgrokError
 
 # ==========================================
 # 設定
@@ -21,9 +23,6 @@ st.write("工事前の写真をアップロードして、工務店への見積�
 # ==========================================
 st.sidebar.header("設定")
 
-# お客様名入力
-customer_name = st.sidebar.text_input("お客様名", placeholder="例：山田 太郎 様")
-
 # 日付設定
 date_mode = st.sidebar.radio(
     "日付の印字",
@@ -36,6 +35,72 @@ if date_mode == "指定日を入れる":
     date_text_fixed = date_input.strftime('%Y.%m.%d')
 elif date_mode == "写真の撮影日(Exif)":
     st.sidebar.info("写真に撮影日情報(Exif)がない場合は印字されません。")
+
+# スマホアクセスの案内
+st.sidebar.markdown("---")
+st.sidebar.subheader("スマホからアクセス")
+
+# 1. ローカルLANアクセス
+try:
+    hostname = socket.gethostname()
+    ip_address = socket.gethostbyname(hostname)
+    st.sidebar.write(f"**Wi-Fi内アクセス:**")
+    st.sidebar.code(f"http://{ip_address}:8501")
+except:
+    pass
+
+st.sidebar.markdown("---")
+
+# 2. 外部公開（ngrok）
+st.sidebar.subheader("外部公開 (ngrok)")
+st.sidebar.info("Wi-Fi外（4G/5Gなど）からアクセスしたい場合はこちら")
+
+# キャッシュリソースとしてトンネル管理
+@st.cache_resource
+def get_ngrok_tunnel(auth_token=None):
+    if auth_token:
+        # トークン設定
+        ngrok.set_auth_token(auth_token)
+    
+    try:
+        # 既存のトンネルを確認
+        tunnels = ngrok.get_tunnels()
+        if tunnels:
+            return tunnels[0].public_url
+    
+        # 新規接続
+        url = ngrok.connect(8501).public_url
+        return url
+    except:
+        return None
+
+# ngrokトークンの入力欄（セッションステートで管理）
+if 'ngrok_token' not in st.session_state:
+    st.session_state.ngrok_token = ""
+
+ngrok_token_input = st.sidebar.text_input("ngrok Authtoken (必要な場合)", type="password", key="token_input")
+
+if st.sidebar.button("外部公開を開始する"):
+    with st.sidebar.status("接続を試みています..."):
+        # トークンがあれば使用
+        token_to_use = ngrok_token_input if ngrok_token_input else None
+        
+        # 接続試行
+        public_url = get_ngrok_tunnel(token_to_use)
+        
+        if public_url:
+            st.sidebar.success("接続成功！")
+            st.sidebar.write("以下のURLにスマホからアクセスしてください:")
+            st.sidebar.code(public_url)
+        else:
+            st.sidebar.error("接続に失敗しました。")
+            st.sidebar.warning(
+                "ngrokのAuthtokenが必要な場合があります。\n"
+                "1. ngrok.comに登録（無料）\n"
+                "2. Your Authtokenをコピー\n"
+                "3. 上記の入力欄に貼り付けて再試行してください。"
+            )
+
 
 # ==========================================
 # メイン処理
@@ -59,8 +124,6 @@ if uploaded_files:
         
         # 画像を開く
         image = Image.open(file)
-        
-        col1, col2 = st.columns([1, 2])
         
         # Exifによる回転補正（スマホ写真で重要）
         try:
@@ -90,7 +153,14 @@ if uploaded_files:
             number = st.text_input(f"番号 (例: ①, {i+1})", value=f"①", key=f"num_{i}")
             content = st.text_area(f"工事箇所・内容", value="トイレ手すり取り付け", key=f"txt_{i}")
             
-            # リストに追加
+            # リストに追加（画像オブジェクトもここで一時保存せず、ファイルポインタを使い回すためにリストには入れないほうが安全だが、
+            # StreamlitのUploadedFileはseek(0)すれば再読込可能。
+            # 回転補正済みの画像を後で使いたいので、処理用には補正済みimageを渡す必要があるが、
+            # 現在のループ構造だと後で再処理している。
+            # ここではシンプルに入力情報だけ保持し、エクセル作成時にもう一度開くか、または補正済み画像を保持するか。
+            # メモリ効率を考えるとファイルから都度読み込むのが良いが、回転補正処理を2回書くことになる。
+            # 今回は機能追加箇所で回転補正済み画像を保存する形に変えるのがスマート。
+            
             data_list.append({
                 "original_file": file, # 元ファイル
                 "number": number,
@@ -98,6 +168,9 @@ if uploaded_files:
                 "full_text": f"{number} {content}"
             })
         st.markdown("---")
+
+    # お客様名入力
+    customer_name = st.sidebar.text_input("お客様名", placeholder="例：山田 太郎 様")
 
     # 3. エクセル作成ボタン
     if st.button("エクセル台帳を作成する"):
@@ -108,6 +181,7 @@ if uploaded_files:
         ws = wb.active
         ws.title = "工事写真台帳"
         
+        # A4縦設定
         # A4縦設定
         ws.page_setup.paperSize = 9 # A4
         ws.page_setup.orientation = 'portrait'
@@ -127,16 +201,8 @@ if uploaded_files:
 
         current_row = 2 # タイトルがあるので2行目から開始
         col_index = 0 # 0:左, 1:右
-        photos_processed = 0
 
-        # フォントファイルの読み込み (クラウド環境対応)
-        font_path = "NotoSansJP-Regular.ttf" # 同じフォルダにあれば優先
-        if not os.path.exists(font_path) and os.name == 'nt':
-            font_path = "C:\\Windows\\Fonts\\meiryo.ttc" # Windowsローカルなければ
-        
         for item in data_list:
-            photos_processed += 1
-            
             # 画像を再度開き、回転補正を行う（プレビュー時と同じ処理）
             item["original_file"].seek(0)
             img_pil = Image.open(item["original_file"])
@@ -173,17 +239,16 @@ if uploaded_files:
 
             draw = ImageDraw.Draw(img_pil)
             
-            # フォントサイズを動的に決定 (画像の高さの5%程度、最低80px)
-            # 画像サイズが大きい(4032pxなど)と200pxくらいになるため視認性アップ
-            font_size = max(int(img_pil.height * 0.05), 80)
-            
+            # フォントサイズを倍にする (40 -> 80)
+            font_size = 80
             try:
-                pil_font = ImageFont.truetype(font_path, font_size)
+                # Windows向けの日本語フォント設定
+                font = ImageFont.truetype("C:\\Windows\\Fonts\\meiryo.ttc", font_size)
             except:
-                 try:
-                     pil_font = ImageFont.truetype("DejaVuSans.ttf", font_size)
-                 except:
-                     pil_font = ImageFont.load_default()
+                try:
+                    font = ImageFont.truetype("DejaVuSans.ttf", font_size)
+                except:
+                    font = ImageFont.load_default()
 
             # 日付テキストの決定
             text_to_draw = None
@@ -202,19 +267,17 @@ if uploaded_files:
                 # 簡易計算: 文字数 * フォントサイズの半角換算 * 係数
                 text_len = len(text_to_draw) * (font_size / 2) 
                 # 右端から少し余裕を持たせる (height - 120 くらいに調整)
-                draw.text((width - 100 - text_len, height - 120), text_to_draw, fill=text_color, font=pil_font)
+                draw.text((width - 100 - text_len, height - 120), text_to_draw, fill=text_color, font=font)
 
             # エクセルに配置するためにバイトストリームに保存
             img_byte_arr = io.BytesIO()
-            if img_pil.mode != "RGB":
-                img_pil = img_pil.convert("RGB")
             img_pil.save(img_byte_arr, format='JPEG')
             img_byte_arr.seek(0)
             
             # エクセル配置用画像オブジェクト作成
             xl_img = ExcelImage(img_byte_arr)
-            xl_img.width = 350 # 横幅少し広げる
-            xl_img.height = 262 # アスペクト比維持で計算 (4:3)
+            xl_img.width = 320
+            xl_img.height = 240
             
             # セル位置決定
             col_letter = 'A' if col_index == 0 else 'B'
@@ -231,16 +294,11 @@ if uploaded_files:
             
             # 行の高さ
             ws.row_dimensions[current_row].height = 30
-            ws.row_dimensions[img_row].height = 210 # 画像に合わせて少し高く
+            ws.row_dimensions[img_row].height = 190
 
             # 次の配置へ
             if col_index == 1:
                 col_index = 0
-                
-                # 改ページ処理（6枚ごとに改ページ）
-                if photos_processed % 6 == 0 and photos_processed < len(data_list):
-                    ws.page_breaks.append(Break(id=img_row)) # 現在の画像行の後にブレイク
-                
                 current_row += 2 # 次の段へ
             else:
                 col_index = 1
