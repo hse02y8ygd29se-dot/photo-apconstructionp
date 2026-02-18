@@ -7,6 +7,7 @@ import datetime
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font
 from openpyxl.drawing.image import Image as ExcelImage
+from openpyxl.worksheet.page_break import Break
 import os
 
 # ==========================================
@@ -130,24 +131,16 @@ if uploaded_files:
 
         current_row = 2 # タイトルがあるので2行目から開始
         col_index = 0 # 0:左, 1:右
+        photos_processed = 0
 
         # フォントファイルの読み込み (クラウド環境対応)
         font_path = "NotoSansJP-Regular.ttf" # 同じフォルダにあれば優先
         if not os.path.exists(font_path) and os.name == 'nt':
             font_path = "C:\\Windows\\Fonts\\meiryo.ttc" # Windowsローカルなければ
         
-        # フォントサイズ (80)
-        font_size = 80
-        
-        try:
-            pil_font = ImageFont.truetype(font_path, font_size)
-        except:
-             try:
-                 pil_font = ImageFont.truetype("DejaVuSans.ttf", font_size)
-             except:
-                 pil_font = ImageFont.load_default()
-
         for item in data_list:
+            photos_processed += 1
+            
             # 画像を再度開き、回転補正を行う（プレビュー時と同じ処理）
             item["original_file"].seek(0)
             img_pil = Image.open(item["original_file"])
@@ -183,6 +176,18 @@ if uploaded_files:
                 pass
 
             draw = ImageDraw.Draw(img_pil)
+            
+            # フォントサイズを動的に決定 (画像の高さの5%程度、最低80px)
+            # 画像サイズが大きい(4032pxなど)と200pxくらいになるため視認性アップ
+            font_size = max(int(img_pil.height * 0.05), 80)
+            
+            try:
+                pil_font = ImageFont.truetype(font_path, font_size)
+            except:
+                 try:
+                     pil_font = ImageFont.truetype("DejaVuSans.ttf", font_size)
+                 except:
+                     pil_font = ImageFont.load_default()
 
             # 日付テキストの決定
             text_to_draw = None
@@ -212,8 +217,8 @@ if uploaded_files:
             
             # エクセル配置用画像オブジェクト作成
             xl_img = ExcelImage(img_byte_arr)
-            xl_img.width = 320
-            xl_img.height = 240
+            xl_img.width = 350 # 横幅少し広げる
+            xl_img.height = 262 # アスペクト比維持で計算 (4:3)
             
             # セル位置決定
             col_letter = 'A' if col_index == 0 else 'B'
@@ -230,11 +235,16 @@ if uploaded_files:
             
             # 行の高さ
             ws.row_dimensions[current_row].height = 30
-            ws.row_dimensions[img_row].height = 190
+            ws.row_dimensions[img_row].height = 210 # 画像に合わせて少し高く
 
             # 次の配置へ
             if col_index == 1:
                 col_index = 0
+                
+                # 改ページ処理（6枚ごとに改ページ）
+                if photos_processed % 6 == 0 and photos_processed < len(data_list):
+                    ws.page_breaks.append(Break(id=img_row)) # 現在の画像行の後にブレイク
+                
                 current_row += 2 # 次の段へ
             else:
                 col_index = 1
