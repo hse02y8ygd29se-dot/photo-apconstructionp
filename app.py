@@ -205,6 +205,8 @@ if uploaded_files:
 
             # エクセルに配置するためにバイトストリームに保存
             img_byte_arr = io.BytesIO()
+            if img_pil.mode in ("RGBA", "P"):
+                img_pil = img_pil.convert("RGB")
             img_pil.save(img_byte_arr, format='JPEG')
             img_byte_arr.seek(0)
             
